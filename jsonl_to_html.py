@@ -21,7 +21,7 @@ from threading import Lock
 
 
 def extract_media_urls_from_text(text):
-    """Extract media URLs from text using regex patterns"""
+    """Extract media URLs from text using regex patterns, including giphy links"""
     if not text:
         return []
     
@@ -41,6 +41,22 @@ def extract_media_urls_from_text(text):
             if match not in found_urls:
                 found_urls.add(match)
                 urls.append(match)
+    
+    # Extract giphy links: ![gif](giphy|ID) or [gif](giphy|ID)
+    giphy_pattern = r'(?:!?\[[^\]]*\]\()?giphy\|([A-Za-z0-9]+)\)?'
+    giphy_matches = re.findall(giphy_pattern, text, re.IGNORECASE)
+    for giphy_id in giphy_matches:
+        # Convert giphy ID to URL
+        # Try different giphy URL formats
+        giphy_urls = [
+            f'https://media.giphy.com/media/{giphy_id}/giphy.gif',
+            f'https://i.giphy.com/{giphy_id}.gif',
+            f'https://media.giphy.com/media/{giphy_id}/200.gif',
+        ]
+        # Add the most common format
+        if f'giphy|{giphy_id}' not in found_urls:
+            found_urls.add(f'giphy|{giphy_id}')
+            urls.append(giphy_urls[0])  # Use the first format, we'll try others if this fails
     
     return urls
 
@@ -267,11 +283,34 @@ def download_media_batch(urls, media_dir, url_to_local_path, max_workers=50):
 
 
 def replace_urls_in_text(text, url_replacements):
-    """Replace URLs in text with local paths"""
+    """Replace URLs in text with local paths, including giphy links"""
     if not text or not url_replacements:
         return text
     
     text = str(text)
+    
+    # First, replace giphy|ID patterns with local paths if they were downloaded
+    # Check if any giphy URLs were downloaded
+    # Pattern matches: ![gif](giphy|ID) or [gif](giphy|ID) or just giphy|ID
+    giphy_pattern = r'(!?\[[^\]]*\]\()?giphy\|([A-Za-z0-9]+)(\))?'
+    def replace_giphy_with_local(match):
+        giphy_id = match.group(2)
+        # Check if this giphy was downloaded
+        giphy_url = f'https://media.giphy.com/media/{giphy_id}/giphy.gif'
+        if giphy_url in url_replacements:
+            local_path = url_replacements[giphy_url]
+            if local_path:
+                # If it's in markdown format ![text](giphy|ID), replace with just the local path
+                # The embed_media_in_text will convert it to an img tag
+                if match.group(1):  # Has markdown prefix like ![gif](
+                    return local_path  # Just return the path, drop the markdown wrapper
+                else:
+                    # Just the giphy|ID pattern
+                    return local_path
+        # If not downloaded, keep the original pattern (it will be handled by embed_media_in_text)
+        return match.group(0)
+    
+    text = re.sub(giphy_pattern, replace_giphy_with_local, text, flags=re.IGNORECASE)
     
     if 'http' not in text:
         return text
@@ -288,23 +327,37 @@ def replace_urls_in_text(text, url_replacements):
 
 
 def embed_media_in_text(text, media_dir='downloaded_media'):
-    """Convert local media file paths in text to HTML img/video tags"""
+    """Convert local media file paths in text to HTML img/video tags, and handle giphy links"""
     if not text:
         return text
     
     text = str(text)
     
-    # Pattern to match local media paths like "downloaded_media/filename.jpg"
-    # or just filenames that look like they're in downloaded_media
-    media_pattern = rf'{re.escape(media_dir)}/[^\s<>")\]]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|mp4|webm|avi|mov|wmv|flv|m4v|mpg|mpeg)'
+    # Convert remaining giphy links to image tags (if not already replaced with local paths)
+    # Pattern: ![gif](giphy|ID) or [gif](giphy|ID) or just giphy|ID
+    # Note: If giphy was downloaded, replace_urls_in_text should have already replaced it with a local path
+    giphy_pattern = r'(?:!?\[[^\]]*\]\()?giphy\|([A-Za-z0-9]+)\)?'
+    def replace_giphy(match):
+        giphy_id = match.group(1)
+        # Use the direct URL (if it wasn't downloaded, this is the fallback)
+        giphy_url = f'https://media.giphy.com/media/{giphy_id}/giphy.gif'
+        return f'<img src="{giphy_url}" style="max-width: 100%; height: auto; margin: 10px 0; border-radius: 4px;" alt="GIF" />'
+    
+    text = re.sub(giphy_pattern, replace_giphy, text, flags=re.IGNORECASE)
+    
+    # Extract just the directory name (not full path) for pattern matching
+    # Paths in text are relative like "downloaded_media/filename.jpg"
+    # But media_dir might be a full path like "output/downloaded_media"
+    media_dir_name = os.path.basename(str(media_dir))
+    
+    # Pattern to match local media paths - match paths that start with the directory name
+    # This will match paths like "downloaded_media/filename.jpg" 
+    # Also match standalone filenames if they're in the media directory
+    media_pattern = rf'{re.escape(media_dir_name)}/[^\s<>")\]]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|mp4|webm|avi|mov|wmv|flv|m4v|mpg|mpeg)'
     
     def replace_media_path(match):
-        media_path = match.group(0)
+        media_path = match.group(0)  # Get the full matched path
         ext = os.path.splitext(media_path)[1].lower()
-        
-        # Check if file actually exists
-        if not os.path.exists(media_path):
-            return media_path  # Return as-is if file doesn't exist
         
         # Escape the path for HTML
         escaped_path = html_lib.escape(media_path)
@@ -345,871 +398,4 @@ def parse_reddit_comment(comment_data, url_replacements=None, media_dir='downloa
     
     # Parse replies recursively
     replies = []
-    if 'replies' in data and data['replies']:
-        if isinstance(data['replies'], dict) and data['replies'].get('kind') == 'Listing':
-            for reply_item in data['replies']['data'].get('children', []):
-                # Skip "more" comments
-                if reply_item.get('kind') == 'more':
-                    continue
-                reply = parse_reddit_comment(reply_item, url_replacements, media_dir)
-                if reply:
-                    replies.append(reply)
-    
-    return {
-        'id': comment_id,
-        'author': author,
-        'body': body,
-        'score': score,
-        'createdAt': created_utc,
-        'replies': replies
-    }
-
-
-def merge_comment_replies(replies1, replies2):
-    """Merge two lists of replies, matching by comment ID"""
-    # Create a dict from replies1 for easy lookup
-    merged = {reply['id']: reply.copy() for reply in replies1}
-    
-    # Merge replies2 into merged
-    for reply2 in replies2:
-        reply_id = reply2['id']
-        if reply_id in merged:
-            # Comment exists in both - merge their replies recursively
-            merged_replies = merge_comment_replies(
-                merged[reply_id].get('replies', []),
-                reply2.get('replies', [])
-            )
-            # Keep the version with more content (prefer non-empty body)
-            if not merged[reply_id].get('body') or merged[reply_id].get('body') == '[unavailable]':
-                if reply2.get('body') and reply2.get('body') != '[unavailable]':
-                    merged[reply_id] = reply2.copy()
-            merged[reply_id]['replies'] = merged_replies
-        else:
-            # New comment, add it
-            merged[reply_id] = reply2.copy()
-    
-    # Return as list, sorted by score (highest first) or creation time
-    return sorted(merged.values(), key=lambda x: (x.get('score', 0), x.get('createdAt', 0)), reverse=True)
-
-
-def merge_comment_trees(tree1, tree2):
-    """Merge two comment trees, matching comments by ID and merging their replies"""
-    merged = {k: v.copy() for k, v in tree1.items()}
-    
-    for comment_id, comment2 in tree2.items():
-        if comment_id in merged:
-            # Comment exists in both trees - merge their replies
-            comment1 = merged[comment_id]
-            merged_replies = merge_comment_replies(
-                comment1.get('replies', []),
-                comment2.get('replies', [])
-            )
-            # Keep the version with more content (prefer non-empty body)
-            if not comment1.get('body') or comment1.get('body') == '[unavailable]':
-                if comment2.get('body') and comment2.get('body') != '[unavailable]':
-                    merged[comment_id] = comment2.copy()
-            merged[comment_id]['replies'] = merged_replies
-        else:
-            # New comment, add it
-            merged[comment_id] = comment2.copy()
-    
-    return merged
-
-
-def parse_reddit_post(post_item, comments_listing, url_replacements=None, media_dir='downloaded_media'):
-    """Parse a Reddit post and its associated comments"""
-    if post_item.get('kind') != 't3':
-        return None
-    
-    data = post_item.get('data', {})
-    post_id = data.get('name', '')
-    title = data.get('title', 'Untitled')
-    selftext = data.get('selftext', '')
-    author = data.get('author', '[deleted]')
-    score = data.get('score', 0)
-    created_utc = data.get('created_utc', 0)
-    subreddit = data.get('subreddit', '')
-    
-    # Replace URLs in body text
-    if url_replacements:
-        selftext = replace_urls_in_text(selftext, url_replacements)
-    
-    # Embed media (convert local paths to HTML img/video tags)
-    selftext = embed_media_in_text(selftext, media_dir)
-    
-    # Build comment tree from comments listing
-    comment_tree = {}
-    if comments_listing and comments_listing.get('kind') == 'Listing':
-        for comment_item in comments_listing['data'].get('children', []):
-            # Skip "more" comments
-            if comment_item.get('kind') == 'more':
-                continue
-            comment = parse_reddit_comment(comment_item, url_replacements, media_dir)
-            if comment:
-                comment_tree[comment['id']] = comment
-    
-    return {
-        'id': post_id,
-        'title': title,
-        'body': selftext,
-        'author': author,
-        'score': score,
-        'createdAt': created_utc,
-        'subreddit': subreddit,
-        'comment_tree': comment_tree
-    }
-
-
-def format_timestamp(timestamp):
-    """Format Unix timestamp to relative time"""
-    if not timestamp:
-        return ""
-    try:
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
-        post_time = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-        diff = now - post_time
-        
-        if diff.days > 365:
-            years = diff.days // 365
-            return f"{years}y ago"
-        elif diff.days > 0:
-            return f"{diff.days}d ago"
-        elif diff.seconds > 3600:
-            hours = diff.seconds // 3600
-            return f"{hours}h ago"
-        elif diff.seconds > 60:
-            minutes = diff.seconds // 60
-            return f"{minutes}m ago"
-        else:
-            return "just now"
-    except:
-        return ""
-
-
-def comment_to_html(comment, depth=0):
-    """Convert comment dictionary to HTML in Reddit style"""
-    author = comment.get('author', '[deleted]')
-    score = comment.get('score', 0)
-    body = comment.get('body', '')
-    created_at = comment.get('createdAt', 0)
-    comment_id = comment.get('id', '')
-    
-    # Format author
-    if author == '[deleted]':
-        author_html = '<span class="deleted-author">[deleted]</span>'
-    else:
-        author_html = f'<a href="#" class="comment-author">u/{html_lib.escape(author)}</a>'
-    
-    # Format score with color
-    score_class = "positive" if score > 0 else "negative" if score < 0 else ""
-    score_display = f"{score:+d}" if score != 0 else "0"
-    
-    # Format timestamp
-    time_str = format_timestamp(created_at)
-    
-    # If body contains HTML tags (from embedded media), use as-is, otherwise escape
-    if '<img' in body or '<video' in body:
-        body_html = body
-    else:
-        body_html = html_lib.escape(body)
-    
-    # Build comment HTML
-    if depth == 0:
-        html_str = f'''<div class="comment">
-            <div class="comment-header">
-                {author_html}
-                <span class="comment-score {score_class}">{score_display} points</span>
-                <span class="comment-time">{time_str}</span>
-            </div>
-            <div class="comment-body">{body_html}</div>'''
-    else:
-        html_str = f'''<div class="comment-thread">
-            <div class="comment">
-                <div class="comment-header">
-                    {author_html}
-                    <span class="comment-score {score_class}">{score_display} points</span>
-                    <span class="comment-time">{time_str}</span>
-                </div>
-                <div class="comment-body">{body_html}</div>'''
-    
-    # Process replies recursively
-    for reply in comment.get('replies', []):
-        html_str += comment_to_html(reply, depth + 1)
-    
-    if depth == 0:
-        html_str += "</div>"
-    else:
-        html_str += "</div></div>"
-    
-    return html_str
-
-
-def generate_html(posts, url_to_local_path, output_file='media_aware_visualization.html'):
-    """Generate HTML visualization from posts dictionary"""
-    html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>Reddit Conversation Visualizer</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        * {{
-            box-sizing: border-box;
-        }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            margin: 0;
-            padding: 0;
-            background: #dae0e6;
-            color: #1c1c1c;
-            line-height: 1.5;
-        }}
-        .header {{
-            background: #ffffff;
-            border-bottom: 1px solid #edeff1;
-            padding: 12px 16px;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        }}
-        .header-content {{
-            max-width: 1200px;
-            margin: 0 auto;
-            display: flex;
-            align-items: center;
-            gap: 16px;
-        }}
-        .header h1 {{
-            margin: 0;
-            font-size: 20px;
-            font-weight: 700;
-            color: #1a1a1b;
-        }}
-        .header-stats {{
-            color: #7c7c7c;
-            font-size: 14px;
-        }}
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 16px;
-        }}
-        .post {{
-            background: #ffffff;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            margin-bottom: 16px;
-            overflow: hidden;
-        }}
-        .post-header {{
-            padding: 12px 16px;
-            border-bottom: 1px solid #edeff1;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }}
-        .post-header-left {{
-            flex: 1;
-        }}
-        .post-title {{
-            font-weight: 600;
-            font-size: 18px;
-            color: #1a1a1b;
-            margin: 0 0 4px 0;
-            line-height: 1.3;
-        }}
-        .post-meta {{
-            font-size: 12px;
-            color: #7c7c7c;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }}
-        .subreddit {{
-            font-weight: 600;
-            color: #1a1a1b;
-        }}
-        .post-author {{
-            color: #1a1a1b;
-        }}
-        .post-score {{
-            color: #7c7c7c;
-        }}
-        .post-body {{
-            padding: 16px;
-            display: block;
-            background: #ffffff;
-            border-top: 1px solid #edeff1;
-            color: #1c1c1c;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-        }}
-        .comments-section {{
-            padding: 0;
-            display: block;
-            background: #ffffff;
-            border-top: 1px solid #edeff1;
-        }}
-        .comment {{
-            padding: 8px 16px;
-            border-left: 2px solid transparent;
-            position: relative;
-        }}
-        .comment:hover {{
-            background: #f8f9fa;
-        }}
-        .comment-thread {{
-            border-left: 2px solid #edeff1;
-            margin-left: 16px;
-            padding-left: 8px;
-        }}
-        .comment-header {{
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 4px;
-            font-size: 12px;
-        }}
-        .comment-author {{
-            font-weight: 600;
-            color: #1a1a1b;
-            text-decoration: none;
-        }}
-        .comment-author:hover {{
-            text-decoration: underline;
-        }}
-        .comment-score {{
-            color: #7c7c7c;
-            font-weight: 600;
-        }}
-        .comment-score.positive {{
-            color: #ff4500;
-        }}
-        .comment-score.negative {{
-            color: #7193ff;
-        }}
-        .comment-time {{
-            color: #7c7c7c;
-        }}
-        .comment-body {{
-            color: #1c1c1c;
-            margin-top: 4px;
-            word-wrap: break-word;
-            line-height: 1.5;
-        }}
-        .comment-body img {{
-            max-width: 100%;
-            height: auto;
-            margin: 8px 0;
-            border-radius: 4px;
-        }}
-        .comment-body video {{
-            max-width: 100%;
-            height: auto;
-            margin: 8px 0;
-            border-radius: 4px;
-        }}
-        .deleted-author {{
-            color: #7c7c7c;
-            font-style: italic;
-        }}
-        .expand-btn {{
-            background: none;
-            border: none;
-            color: #0079d3;
-            cursor: pointer;
-            font-size: 12px;
-            padding: 4px 8px;
-            margin-left: -8px;
-        }}
-        .expand-btn:hover {{
-            text-decoration: underline;
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <div class="header-content">
-            <h1>📱 Reddit Conversation Visualizer</h1>
-            <div class="header-stats">
-                {len(posts):,} posts • {len(url_to_local_path):,} media files
-            </div>
-        </div>
-    </div>
-    <div class="container">
-        <div class="post-list">
-
-"""
-    
-    for post_id, post in posts.items():
-        title = html_lib.escape(post.get('title', 'Untitled'))
-        body = post.get('body', '')  # Already processed with URL replacements and media embedding
-        comment_tree = post.get('comment_tree', {})
-        author = html_lib.escape(post.get('author', '[deleted]'))
-        score = post.get('score', 0)
-        subreddit = html_lib.escape(post.get('subreddit', ''))
-        created_at = post.get('createdAt', 0)
-        time_str = format_timestamp(created_at)
-        
-        # If body contains HTML tags (from embedded media), use as-is, otherwise escape
-        if '<img' in body or '<video' in body:
-            body_html = body
-        else:
-            body_html = html_lib.escape(body)
-        
-        # Count comments
-        def count_all_comments(tree):
-            count = len(tree)
-            for comment in tree.values():
-                if comment.get('replies'):
-                    count += len(comment['replies'])
-            return count
-        
-        comment_count = count_all_comments(comment_tree)
-        
-        html_content += f"""            <div class="post">
-                <div class="post-header">
-                    <div class="post-header-left">
-                        <div class="post-title">{title}</div>
-                        <div class="post-meta">
-                            <span class="subreddit">r/{subreddit}</span>
-                            <span>•</span>
-                            <span class="post-author">u/{author}</span>
-                            <span>•</span>
-                            <span class="post-score">{score} points</span>
-                            <span>•</span>
-                            <span class="comment-time">{time_str}</span>
-                            <span>•</span>
-                            <span>{comment_count} comments</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="post-body" id="post-{post_id}">
-                    {body_html}
-                </div>
-                <div class="comments-section" id="comments-{post_id}">
-"""
-        for comment_id, comment in comment_tree.items():
-            html_content += comment_to_html(comment, 0)
-        
-        html_content += "</div></div>"
-    
-    html_content += """
-        </div>
-    </div>
-</body>
-</html>
-"""
-    
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(html_content)
-    
-    print(f"✓ HTML visualization saved to {output_file}")
-
-
-def clean_text_for_training(text, preserve_media_paths=True, output_dir=None):
-    """Remove HTML tags from text, optionally preserving local media paths for training"""
-    if not text:
-        return ""
-    
-    import re
-    # Extract image paths from img tags and replace with just the path
-    def replace_img_tag(match):
-        img_tag = match.group(0)
-        # Extract src attribute
-        src_match = re.search(r'src=["\']([^"\']+)["\']', img_tag)
-        if src_match:
-            path = src_match.group(1)
-            # Normalize path relative to output directory if provided
-            if output_dir and preserve_media_paths:
-                try:
-                    # If path is absolute or relative, make it relative to output_dir
-                    path_obj = Path(path)
-                    if path_obj.is_absolute():
-                        path = os.path.relpath(path, output_dir)
-                    # If it's already relative, keep it as-is (should be relative to output_dir already)
-                except:
-                    pass  # Keep original path if normalization fails
-            return path
-        return '[image]'
-    
-    # Extract video paths from video tags
-    def replace_video_tag(match):
-        video_tag = match.group(0)
-        # Extract src from source tag
-        src_match = re.search(r'<source[^>]+src=["\']([^"\']+)["\']', video_tag)
-        if src_match:
-            path = src_match.group(1)
-            # Normalize path relative to output directory if provided
-            if output_dir and preserve_media_paths:
-                try:
-                    path_obj = Path(path)
-                    if path_obj.is_absolute():
-                        path = os.path.relpath(path, output_dir)
-                except:
-                    pass
-            return path
-        return '[video]'
-    
-    # Replace img tags with their src paths
-    text = re.sub(r'<img[^>]*>', replace_img_tag, text)
-    # Replace video tags with their src paths
-    text = re.sub(r'<video[^>]*>.*?</video>', replace_video_tag, text, flags=re.DOTALL)
-    # Remove any remaining HTML tags
-    text = re.sub(r'<[^>]+>', '', text)
-    # Decode HTML entities
-    text = html_lib.unescape(text)
-    
-    # If preserve_media_paths is False, replace paths with placeholders
-    if not preserve_media_paths:
-        # Replace local file paths with placeholders
-        text = re.sub(r'[^\s<>")\]]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|mp4|webm|avi|mov|wmv|flv|m4v|mpg|mpeg)', '[media]', text, flags=re.IGNORECASE)
-    
-    return text.strip()
-
-
-def comment_to_dict(comment, preserve_media_paths=True, output_dir=None):
-    """Convert comment object to dictionary for JSONL export"""
-    return {
-        'id': comment.get('id', ''),
-        'author': comment.get('author', '[deleted]'),
-        'body': clean_text_for_training(comment.get('body', ''), preserve_media_paths=preserve_media_paths, output_dir=output_dir),
-        'score': comment.get('score', 0),
-        'created_at': comment.get('createdAt', 0),
-        'replies': [comment_to_dict(reply, preserve_media_paths=preserve_media_paths, output_dir=output_dir) for reply in comment.get('replies', [])]
-    }
-
-
-def export_to_jsonl(posts, output_file='conversation_data_cleaned.jsonl', preserve_media_paths=True, output_dir=None):
-    """Export posts to cleaned JSONL format suitable for training"""
-    print(f"\nExporting cleaned JSONL: {output_file}")
-    if preserve_media_paths:
-        print("  (Preserving local media file paths for training)")
-    
-    # Get output directory for path normalization
-    if output_dir is None:
-        output_dir = os.path.dirname(output_file) or '.'
-    output_dir = Path(output_dir).resolve()
-    
-    try:
-        exported_count = 0
-        
-        with open(output_file, 'w', encoding='utf-8') as f:
-            for post_id, post in posts.items():
-                try:
-                    comment_tree = post.get('comment_tree', {})
-                    
-                    # Convert comment tree to list
-                    comments_list = []
-                    for comment_id, comment in comment_tree.items():
-                        try:
-                            comments_list.append(comment_to_dict(comment, preserve_media_paths=preserve_media_paths, output_dir=output_dir))
-                        except Exception as e:
-                            print(f"  Warning: Failed to process comment {comment_id}: {e}")
-                            continue
-                    
-                    post_data = {
-                        'id': post.get('id', ''),
-                        'title': clean_text_for_training(post.get('title', ''), preserve_media_paths=preserve_media_paths),
-                        'author': post.get('author', '[deleted]'),
-                        'body': clean_text_for_training(post.get('body', ''), preserve_media_paths=preserve_media_paths, output_dir=output_dir),
-                        'score': post.get('score', 0),
-                        'created_at': post.get('createdAt', 0),
-                        'subreddit': post.get('subreddit', ''),
-                        'comment_count': len(comments_list),
-                        'comments': comments_list
-                    }
-                    
-                    f.write(json.dumps(post_data, ensure_ascii=False) + '\n')
-                    exported_count += 1
-                    
-                except Exception as e:
-                    print(f"  Warning: Failed to export post {post_id}: {e}")
-                    continue
-        
-        print(f"✓ JSONL export saved to {output_file}")
-        print(f"  - {exported_count} posts exported")
-        
-    except Exception as e:
-        print(f"✗ JSONL export failed: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-def load_jsonl_file(input_file, posts_data, all_media_urls):
-    """Load a single JSONL file and extract posts/comments"""
-    print(f"Reading Reddit JSONL data from {input_file}...")
-    
-    with open(input_file, 'r', encoding='utf-8') as f:
-        for line_num, line in enumerate(f, 1):
-            try:
-                data = json.loads(line.strip())
-                
-                # Reddit API format: [Listing (posts), Listing (comments)]
-                if not isinstance(data, list) or len(data) < 1:
-                    print(f"  Warning: Line {line_num} is not in expected Reddit API format")
-                    continue
-                
-                # First element should be posts listing
-                posts_listing = data[0] if len(data) > 0 else None
-                # Second element should be comments listing (if present)
-                comments_listing = data[1] if len(data) > 1 else None
-                
-                if not posts_listing or posts_listing.get('kind') != 'Listing':
-                    print(f"  Warning: Line {line_num} does not contain a posts listing")
-                    continue
-                
-                # Process each post in the listing
-                for post_item in posts_listing['data'].get('children', []):
-                    if post_item.get('kind') != 't3':
-                        continue
-                    
-                    post_data = post_item.get('data', {})
-                    
-                    # Extract media URLs from post
-                    post_media = extract_media_from_reddit_post(post_data)
-                    all_media_urls.update(post_media)
-                    
-                    # Extract media from comments
-                    if comments_listing and comments_listing.get('kind') == 'Listing':
-                        for comment_item in comments_listing['data'].get('children', []):
-                            if comment_item.get('kind') == 't1':
-                                comment_data = comment_item.get('data', {})
-                                comment_media = extract_media_from_comment(comment_data)
-                                all_media_urls.update(comment_media)
-                                
-                                # Also check replies recursively
-                                if 'replies' in comment_data and comment_data['replies']:
-                                    if isinstance(comment_data['replies'], dict) and comment_data['replies'].get('kind') == 'Listing':
-                                        def extract_from_replies(replies_listing):
-                                            for reply_item in replies_listing['data'].get('children', []):
-                                                if reply_item.get('kind') == 't1':
-                                                    reply_data = reply_item.get('data', {})
-                                                    reply_media = extract_media_from_comment(reply_data)
-                                                    all_media_urls.update(reply_media)
-                                                    if 'replies' in reply_data and reply_data['replies']:
-                                                        if isinstance(reply_data['replies'], dict) and reply_data['replies'].get('kind') == 'Listing':
-                                                            extract_from_replies(reply_data['replies'])
-                                        extract_from_replies(comment_data['replies'])
-                    
-                    # Store post data for later processing
-                    post_id = post_data.get('name', '')
-                    if post_id:
-                        # If post already exists, we'll merge comments later
-                        if post_id not in posts_data:
-                            posts_data[post_id] = {
-                                'post_item': post_item,
-                                'comments_listings': []
-                            }
-                        # Add this comments listing to the list (we'll merge them later)
-                        if comments_listing:
-                            posts_data[post_id]['comments_listings'].append(comments_listing)
-                        # Keep the most complete post_item (prefer one with more data)
-                        existing_item = posts_data[post_id]['post_item']
-                        if len(str(post_data.get('selftext', ''))) > len(str(existing_item.get('data', {}).get('selftext', ''))):
-                            posts_data[post_id]['post_item'] = post_item
-                        
-            except json.JSONDecodeError as e:
-                print(f"  Warning: Line {line_num} contains invalid JSON: {e}")
-                continue
-            except Exception as e:
-                print(f"  Warning: Line {line_num} caused an error: {e}")
-                continue
-    
-    print(f"✓ Processed posts from {input_file}")
-
-
-def get_input_files(input_paths):
-    """Get list of JSONL files from input paths (files or directories)"""
-    input_files = []
-    
-    for path in input_paths:
-        path_obj = Path(path)
-        if path_obj.is_file():
-            if path.endswith('.jsonl'):
-                input_files.append(str(path_obj))
-            else:
-                print(f"  Warning: {path} is not a .jsonl file, skipping...")
-        elif path_obj.is_dir():
-            # Find all JSONL files in directory
-            jsonl_files = list(path_obj.glob('*.jsonl'))
-            if jsonl_files:
-                input_files.extend([str(f) for f in jsonl_files])
-                print(f"  Found {len(jsonl_files)} JSONL files in {path}")
-            else:
-                print(f"  Warning: No .jsonl files found in {path}")
-        else:
-            print(f"  Warning: {path} does not exist, skipping...")
-    
-    return input_files
-
-
-def main():
-    """Main function to convert JSONL to HTML"""
-    parser = argparse.ArgumentParser(
-        description='Convert Reddit JSONL files to HTML visualization with media downloads',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Process specific files
-  python3 jsonl_to_html.py -i test.jsonl test3.jsonl -o output/
-  
-  # Process all JSONL files in a directory
-  python3 jsonl_to_html.py -i data/ -o output/
-  
-  # Process files and directory together
-  python3 jsonl_to_html.py -i file1.jsonl data/ -o output/
-        """
-    )
-    
-    parser.add_argument(
-        '-i', '--input',
-        nargs='+',
-        required=True,
-        help='Input JSONL file(s) or directory/directories containing JSONL files'
-    )
-    
-    parser.add_argument(
-        '-o', '--output',
-        default='.',
-        help='Output directory (default: current directory)'
-    )
-    
-    parser.add_argument(
-        '--html-name',
-        default='media_aware_visualization.html',
-        help='Output HTML filename (default: media_aware_visualization.html)'
-    )
-    
-    parser.add_argument(
-        '--jsonl-name',
-        default='conversation_data_cleaned.jsonl',
-        help='Output JSONL filename (default: conversation_data_cleaned.jsonl)'
-    )
-    
-    parser.add_argument(
-        '--media-dir',
-        default='downloaded_media',
-        help='Directory for downloaded media (default: downloaded_media)'
-    )
-    
-    parser.add_argument(
-        '--workers',
-        type=int,
-        default=50,
-        help='Number of parallel workers for media downloads (default: 50)'
-    )
-    
-    args = parser.parse_args()
-    
-    # Get input files
-    input_files = get_input_files(args.input)
-    
-    if not input_files:
-        print("Error: No valid JSONL files found!")
-        return
-    
-    print(f"Processing {len(input_files)} JSONL file(s):")
-    for f in input_files:
-        print(f"  - {f}")
-    
-    # Setup output directory
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Setup paths
-    output_file = output_dir / args.html_name
-    jsonl_output = output_dir / args.jsonl_name
-    media_dir = output_dir / args.media_dir
-    
-    # Create media directory
-    media_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\nMedia will be saved to: {media_dir}/")
-    print(f"Output HTML: {output_file}")
-    print(f"Output JSONL: {jsonl_output}")
-    
-    posts_data = {}
-    all_media_urls = set()
-    
-    # First pass: Load all JSONL files and collect posts/comments
-    for input_file in input_files:
-        load_jsonl_file(input_file, posts_data, all_media_urls)
-    
-    print(f"\n✓ Total unique posts across all files: {len(posts_data)}")
-    print(f"✓ Found {len(all_media_urls)} unique media URLs")
-    
-    if not posts_data:
-        print("No posts found! Exiting.")
-        return
-    
-    # Download all media
-    url_to_local_path = {}
-    if all_media_urls:
-        downloaded = download_media_batch(list(all_media_urls), str(media_dir), url_to_local_path, max_workers=args.workers)
-        url_to_local_path.update(downloaded)
-    
-    # Create URL replacements map (relative paths for HTML)
-    url_replacements = {}
-    for url, local_path in url_to_local_path.items():
-        if local_path:
-            # Calculate relative path from HTML file to media file
-            relative_path = os.path.relpath(local_path, output_dir)
-            url_replacements[url] = relative_path
-    
-    # Second pass: Parse posts with URL replacements and merge comments
-    print("\nProcessing posts with downloaded media and merging comments...")
-    posts = {}
-    
-    for post_id, post_info in posts_data.items():
-        # Parse post with first comments listing
-        comments_listings = post_info.get('comments_listings', [])
-        
-        if not comments_listings:
-            # No comments, just parse the post
-            post = parse_reddit_post(post_info['post_item'], None, url_replacements, str(media_dir))
-            if post:
-                posts[post_id] = post
-        else:
-            # Parse post with first comments listing
-            post = parse_reddit_post(post_info['post_item'], comments_listings[0], url_replacements, str(media_dir))
-            
-            if post:
-                # Merge comments from all listings
-                merged_comment_tree = post['comment_tree']
-                for comments_listing in comments_listings[1:]:
-                    # Parse comments from this listing
-                    temp_post = parse_reddit_post(post_info['post_item'], comments_listing, url_replacements, str(media_dir))
-                    if temp_post:
-                        # Merge comment trees
-                        merged_comment_tree = merge_comment_trees(merged_comment_tree, temp_post['comment_tree'])
-                
-                post['comment_tree'] = merged_comment_tree
-                posts[post_id] = post
-                
-                # Count total comments for logging
-                def count_comments(tree):
-                    count = len(tree)
-                    for comment in tree.values():
-                        if comment.get('replies'):
-                            count += sum(1 for _ in comment['replies'])
-                    return count
-                
-                total_comments = count_comments(merged_comment_tree)
-                print(f"  Post {post_id}: {total_comments} total comments (merged from {len(comments_listings)} sources)")
-    
-    print(f"\nGenerating HTML visualization: {output_file}")
-    generate_html(posts, url_to_local_path, str(output_file))
-    
-    # Export cleaned JSONL for training (preserving local media paths)
-    export_to_jsonl(posts, str(jsonl_output), preserve_media_paths=True, output_dir=output_dir)
-    
-    print("\n✅ Complete!")
-    print(f"📄 Open {output_file} to view the output.")
-    print(f"📁 Media files are in the {media_dir}/ directory.")
-    print(f"📋 Cleaned JSONL for training: {jsonl_output}")
-
-
-if __name__ == "__main__":
-    main()
+    if 'rep
