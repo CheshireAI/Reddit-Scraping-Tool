@@ -5,9 +5,11 @@ A Python script that converts Reddit JSONL files (Reddit API format) into a beau
 ## Features
 
 - **Media-Aware**: Automatically downloads images and videos from posts and comments
+- **Giphy Support**: Extracts and downloads giphy links (e.g., `![gif](giphy|ID)`)
+- **Preview Images**: Embeds preview and thumbnail images even if not in post body text
 - **Comment Merging**: Combines comments from multiple JSONL files (useful when users block each other)
 - **Reddit-Style UI**: Beautiful HTML output that looks like Reddit
-- **Training Data Export**: Exports cleaned JSONL format suitable for ML training
+- **Training Data Export**: Exports cleaned JSONL format with local media paths for training
 - **Parallel Downloads**: Fast media downloads using multiple workers
 
 ## Installation
@@ -127,9 +129,10 @@ A Reddit-style HTML page showing:
 
 Training-ready format with:
 - One post per line
-- Cleaned text (HTML tags removed, media replaced with `[image]`/`[video]` placeholders)
+- Cleaned text (HTML tags removed, media paths preserved as local file references)
 - Nested comment structure preserved
 - All metadata (scores, timestamps, authors)
+- Local media paths for training (e.g., `downloaded_media/filename.jpg`)
 
 Example output line:
 ```json
@@ -137,7 +140,7 @@ Example output line:
   "id": "t3_xxxxx",
   "title": "Post Title",
   "author": "username",
-  "body": "Post body text",
+  "body": "Post body text downloaded_media/image1.jpg",
   "score": 100,
   "created_at": 1234567890,
   "subreddit": "subredditname",
@@ -146,7 +149,7 @@ Example output line:
     {
       "id": "t1_xxxxx",
       "author": "commenter",
-      "body": "Comment text [image]",
+      "body": "Comment text downloaded_media/image2.jpg",
       "score": 50,
       "created_at": 1234567890,
       "replies": [...]
@@ -174,7 +177,8 @@ All downloaded images and videos are saved here with MD5-based filenames to avoi
 ### 3. Processing Phase
 - Merges comments from multiple files (by matching comment IDs)
 - Replaces media URLs with local file paths
-- Embeds images/videos as HTML tags
+- Converts giphy links to local file paths
+- Embeds all images/videos as HTML tags (including preview/thumbnail images)
 - Processes nested comment threads recursively
 
 ### 4. Export Phase
@@ -193,21 +197,25 @@ When multiple JSONL files contain the same post, the script:
 
 - **Extraction**: Finds media URLs in:
   - Post `url` and `url_overridden_by_dest` fields
-  - Post `preview` images
-  - Post `thumbnail` images
+  - Post `preview` images (automatically embedded even if not in body)
+  - Post `thumbnail` images (automatically embedded even if not in body)
   - Gallery images (`gallery_data`/`media_metadata`)
   - URLs in post/comment body text
+  - Giphy links: `![gif](giphy|ID)` or `giphy|ID` format
 
 - **Download**: 
   - Parallel downloads using ThreadPoolExecutor
   - Retry logic for failed downloads
   - Deduplication by URL
   - Progress tracking
+  - Giphy GIFs are downloaded and saved locally
 
 - **Embedding**:
-  - Images: `<img>` tags with responsive styling
-  - Videos: `<video>` tags with controls
-  - Local paths replaced in HTML for proper display
+  - All downloaded images are embedded as `<img>` tags in HTML
+  - Videos embedded as `<video>` tags with controls
+  - Preview/thumbnail images included even if not in post body text
+  - Giphy links converted to local image references
+  - Responsive styling for all media
 
 ## Troubleshooting
 
@@ -225,3 +233,14 @@ When multiple JSONL files contain the same post, the script:
 - Ensure `downloaded_media/` directory is in the same location as HTML file
 - Check that media files were actually downloaded
 - Verify relative paths in HTML source
+- All downloaded files should be embedded as `<img>` tags - check HTML source to confirm
+
+### Giphy links not working
+- Giphy links are automatically extracted and downloaded
+- Format: `![gif](giphy|ID)` or just `giphy|ID` in text
+- Downloaded giphy files are saved with MD5-based filenames
+- If a giphy fails to download, it will fall back to external URL
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
