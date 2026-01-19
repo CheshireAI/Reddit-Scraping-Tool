@@ -225,7 +225,3 @@ When multiple JSONL files contain the same post, the script:
 - Ensure `downloaded_media/` directory is in the same location as HTML file
 - Check that media files were actually downloaded
 - Verify relative paths in HTML source
-
-## License
-
-This script is provided as-is for processing Reddit data.
